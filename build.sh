@@ -16,6 +16,41 @@ set -e
 set -u
 set -o pipefail
 
+## Cleanup
+
+cleanup_mountpoints=()
+cleanup_loopback=()
+
+trap_err() {
+        log_warn "Cleaning up after unclean exit..."
+        trap - INT TERM EXIT
+        cleanup
+        exit 1
+}
+
+cleanup() {
+        if [ ${#cleanup_mountpoints[@]} -ne 0 ]; then
+                log_progress "Unmounting all images..."
+                for ((i = ${#cleanup_mountpoints[@]}-1 ; i >= 0; i--)); do
+                        log_progress "umount ${cleanup_mountpoints[$i]}"
+                        umount -l "${cleanup_mountpoints[$i]}"
+                done
+                cleanup_mountpoints=()
+        fi
+
+        if [ ${#cleanup_loopback[@]} -ne 0 ]; then
+                log_progress "Removing loop devices..."
+                for ((i = ${#cleanup_loopback[@]}-1 ; i >= 0; i--)); do
+                        losetup -d "${cleanup_loopback[$i]}"
+                done
+                cleanup_mountpoints=()
+        fi
+}
+
+trap trap_err INT TERM EXIT
+
+## Logging helpers
+
 log_progress() {
         echo " [ .. ] $1"
 }
@@ -36,6 +71,8 @@ fatal() {
         echo " [ !! ] $1"
         exit 1
 }
+
+## Main script
 
 log_progress "Preparing..."
 
@@ -68,32 +105,39 @@ xzcat $WORK/$src_xz > $WORK/$src
 log_progress "Mounting source image..."
 
 src_dev=$(losetup --show --find -P $WORK/$src)
+cleanup_loopback+=("$src_dev")
 
 mount -o ro ${src_dev}p3 $WORK/mnt/src
+cleanup_mountpoints+=("$WORK/mnt/src")
 
 log_progress "Preparing destination images..."
 
 rm -f $WORK/usb.img
-truncate -s 30000M $WORK/usb.img
+truncate -s 2000M $WORK/usb.img
 
 usb_dev=$(losetup --show --find -P $WORK/usb.img)
-parted --script $usb_dev mklabel gpt mkpart primary linux-swap 1M 513M mkpart primary ext4 514M 100%
+cleanup_loopback+=("$usb_dev")
+parted --script $usb_dev mklabel msdos mkpart primary linux-swap 1M 513M mkpart primary ext4 514M 100%
 
 mkswap ${usb_dev}p1
 mkfs.ext4 ${usb_dev}p2
 
 rm -f $WORK/sd.img
-truncate -s 512M $WORK/sd.img
+truncate -s 100M $WORK/sd.img
 
 sd_dev=$(losetup --show --find -P $WORK/sd.img)
-parted --script $sd_dev mklabel msdos mkpart primary 1M 100%
+cleanup_loopback+=("$sd_dev")
+parted --script $sd_dev mklabel msdos mkpart primary 0% 100%
 
-mkfs.vfat ${sd_dev}p1
+mkfs.fat -F16 ${sd_dev}p1 -n BOOT
+
+parted --script $sd_dev set 1 lba on
 
 log_progress "Mounting USB destination image..."
 
 usbroot=$WORK/mnt/usb
 mount ${usb_dev}p2 $usbroot
+cleanup_mountpoints+=("$usbroot")
 
 log_progress "rsyncing base system..."
 
@@ -102,6 +146,7 @@ rsync -a tmp/mnt/src/ $usbroot
 log_progress "Mounting SD destination image..."
 
 mount ${sd_dev}p1 $usbroot/boot
+cleanup_mountpoints+=("$usbroot/boot")
 
 log_progress "Removing Fedora kernel..."
 rm -f $usbroot/var/lib/rpm/__db.*
@@ -132,9 +177,9 @@ chmod a+x $usbroot/usr/local/rpi-update
 SKIP_BACKUP=1 ROOT_PATH=$usbroot BOOT_PATH=$usbroot/boot $usbroot/usr/local/rpi-update
 
 log_progress "Configuring firmware..."
-root_pt_uuid=$(blkid ${usb_dev}p2 -o value -s PT_UUID)
+root_partuuid=$(blkid ${usb_dev}p2 -o value -s PARTUUID)
 cat > $usbroot/boot/cmdline.txt <<EOF
-console=ttyAMA0,115200 kgdboc=ttyAMA0,115200 console=tty1 root=PARTUUID=$root_pt_uuid rootfstype=ext4 rootwait
+console=ttyAMA0,115200 kgdboc=ttyAMA0,115200 console=tty1 root=PARTUUID=$root_partuuid rootfstype=ext4 rootwait
 EOF
 
 log_progress "Configuring root password..."
@@ -146,17 +191,9 @@ CPW="$crypted_password" perl -i -ne '@e = split(/:/) ; $e[1]=$ENV{"CPW"} if $e[0
 
 rm $usbroot/etc/systemd/system/multi-user.target.wants/initial-setup-text.service
 
-log_progress "Unmounting all images..."
 
-umount $usbroot/boot
-umount $usbroot
-umount $WORK/mnt/src
-
-log_progress "Removing loop devices..."
-
-losetup -d $usb_dev
-losetup -d $sd_dev
-losetup -d $src_dev
+cleanup
+trap - INT TERM EXIT
 
 log_progress "Finishing up..."
 
