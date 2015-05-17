@@ -5,8 +5,10 @@
 WORK=$(pwd)/tmp
 OUT=$(pwd)/out
 
-IMG_URL=http://mirror.bytemark.co.uk/fedora/linux/releases/21/Images/armhfp/Fedora-Minimal-armhfp-21-5-sda.raw.xz
-IMG_SHA256SUM=6bfcc365f42206abb51f72c9ad7ba9d88b6da776e7f7a4a0f510e68bf96ac49b
+IMG_XZ_URL=http://mirror.bytemark.co.uk/fedora/linux/releases/21/Images/armhfp/Fedora-Minimal-armhfp-21-5-sda.raw.xz
+IMG_XZ_SHA256SUM=6bfcc365f42206abb51f72c9ad7ba9d88b6da776e7f7a4a0f510e68bf96ac49b
+
+IMG_SHA256SUM=ce7e0993dbef70111bd9156a260672be6b492775cfa3cddb53cbcb655ef11720
 
 RPI_UPDATE_URL=https://raw.githubusercontent.com/Hexxeh/rpi-update/master/rpi-update
 
@@ -82,25 +84,44 @@ mkdir -p $OUT
 mkdir -p $WORK/mnt/usb
 mkdir -p $WORK/mnt/src
 
-src_xz=$(echo $IMG_URL | sed -e 's/.*\///')
+src_xz=$(echo $IMG_XZ_URL | sed -e 's/.*\///')
 src=$(basename -s .xz $src_xz)
 
 log_progress "Validating source image..."
 
-validate_image() {
-        (echo "$IMG_SHA256SUM $WORK/$src_xz" | sha256sum --check --quiet)
+validate_xz_image() {
+        (echo "$IMG_XZ_SHA256SUM $WORK/$src_xz" | sha256sum --check --quiet)
 }
 
+validate_image() {
+        (echo "$IMG_SHA256SUM $WORK/$src" | sha256sum --check --quiet)
+}
 
-if ([ ! -f $WORK/$src_xz ] || ! validate_image) ; then 
-        log_warn "source image missing or bad checksum"
-        curl -o $WORK/$src_xz $IMG_URL
-        validate_image || fatal "downloaded image didn't match checksum!"
+need_extract=1
+need_download=1
+
+if ([ -f $WORK/$src ] && validate_image) ; then 
+        need_extract=0
+        need_download=0
 fi
 
-log_progress "Extracting source image..."
+if [ "$need_extract" = "1" ] ; then
+        if ([ -f $WORK/$src_xz ] && validate_xz_image) ; then 
+                need_download=0
+        fi
+fi
 
-xzcat $WORK/$src_xz > $WORK/$src
+if [ "$need_download" = "1" ] ; then
+        log_progress "Downloading source image..."
+        curl -o $WORK/$src_xz $IMG_XZ_URL
+        validate_xz_image || fatal "downloaded image didn't match checksum!"
+fi
+
+if [ "$need_extract" = "1" ] ; then
+        log_progress "Extracting source image..."
+        xzcat $WORK/$src_xz > $WORK/$src
+        validate_image || fatal "extracted image didn't match checksum!"
+fi
 
 log_progress "Mounting source image..."
 
